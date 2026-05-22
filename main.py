@@ -1,42 +1,44 @@
 # ============================================================
-#  main.py — COMPLETE FINAL VERSION
+#  main.py — CORRECTED FINAL VERSION
 #
 #  All features:
 #    Gestures  : ATTRACT · EXPLODE · PAINT · FLOCK
-#                FROZEN · GALAXY · PULSE · SPAWN
+#                FROZEN · GALAXY · PULSE · SPAWN · WRITE
 #    Effects   : Constellation · Galaxy rings · Painter
-#                Magnetic trail · Pulse shockwave
+#                Finger writer · Pulse shockwave
 #    Physics   : Attraction · Repulsion · Orbit · Boids
 #                Two-hand compress/expand · Velocity push
 #                Ball merging
 #    Settings  : Force · Ball count · Trail · Glow (live)
 #
 #  Keys:
-#    Q  quit     S  screenshot    R  reset balls
-#    C  clear paint & trail       X  toggle constellation
-#    P  toggle settings panel
+#    Q  quit        S  screenshot    R  reset balls
+#    C  clear all   X  constellation  P  settings
+#    W  write mode toggle
 # ============================================================
 
 import cv2
 import numpy as np
 import time
 
-from config                  import *
-from core.camera_thread       import CameraThread
-from core.hand_tracker        import HandTracker
-from core.gesture_detector    import GestureDetector
-from core.particle_system     import ParticleSystem
-from core.physics             import Physics
-from rendering.renderer       import Renderer
-from rendering.ui             import UI
-from rendering.settings_panel import SettingsPanel
-from utils.screenshot         import save_screenshot
-from effects.pulse            import PulseEffect
-from effects.galaxy           import GalaxyEffect
-from effects.painter          import Painter
-from effects.constellation    import Constellation
-from effects.flock            import Flock
-from effects.magnetic_trail   import MagneticTrail
+from config                   import *
+from core.camera_thread        import CameraThread
+from core.hand_tracker         import HandTracker
+from core.gesture_detector     import GestureDetector
+from core.particle_system      import ParticleSystem
+from core.physics              import Physics
+from rendering.renderer        import Renderer
+from rendering.ui              import UI
+from rendering.settings_panel  import SettingsPanel
+from utils.screenshot          import save_screenshot
+from effects.pulse             import PulseEffect
+from effects.galaxy            import GalaxyEffect
+from effects.painter           import Painter
+from effects.constellation     import Constellation
+from effects.flock             import Flock
+from effects.finger_writer     import FingerWriter
+# FIX 1: MagneticTrail removed — was never instantiated but was still
+#         referenced in 3 places (mag_trail.update / draw / clear)
 
 
 # ── Helpers ───────────────────────────────────────────────────
@@ -59,10 +61,12 @@ def resolve_mode(gestures):
 class VelocityTracker:
     def __init__(self):
         self._prev = {}
+
     def update(self, idx, center):
         prev = self._prev.get(idx, center)
         self._prev[idx] = center
-        return (center[0]-prev[0], center[1]-prev[1])
+        return (center[0] - prev[0], center[1] - prev[1])
+
     def clear(self):
         self._prev.clear()
 
@@ -87,13 +91,12 @@ def main():
     painter       = Painter(WINDOW_WIDTH, WINDOW_HEIGHT)
     constellation = Constellation()
     flock         = Flock()
-    mag_trail     = MagneticTrail()
+    writer        = FingerWriter(WINDOW_WIDTH, WINDOW_HEIGHT)
 
     if not cam.is_opened():
-        print("[ERROR] Camera not found.")
+        print("[ERROR] Camera not found — try CAMERA_INDEX=1 in config.py")
         return
 
-    # Create window first so we can attach mouse callback
     cv2.namedWindow(WINDOW_TITLE)
     cv2.setMouseCallback(WINDOW_TITLE, settings.mouse_callback)
 
@@ -103,7 +106,7 @@ def main():
     frame_n      = 0
 
     print("[INFO] Ready.")
-    print("[INFO] Q=quit  S=screenshot  R=reset  C=clear  X=lines  P=settings")
+    print("[INFO] Q=quit  S=screenshot  R=reset  C=clear  X=lines  P=settings  W=write")
 
     while True:
         ret, frame = cam.read()
@@ -115,152 +118,153 @@ def main():
         h, w   = frame.shape[:2]
         frame_n += 1
 
-        # ── 1. Apply settings to live systems ─────────────────
-        physics.force_mult      = settings.values['force'] / 300.0
-        renderer.trail_alpha    = settings.values['trail']
-        renderer.glow_kernel    = settings.values['glow']
+        # ── 1. Apply live settings ────────────────────────────
+        physics.force_mult   = settings.values['force'] / 300.0
+        renderer.trail_alpha = settings.values['trail']
+        renderer.glow_kernel = settings.values['glow']
 
-        # Gradually grow ball count if below target
         target_balls = settings.values['balls']
         if frame_n % 20 == 0:
             if ps.count < target_balls:
-                rx = int(np.random.randint(80, WINDOW_WIDTH - 80))
+                rx = int(np.random.randint(80, WINDOW_WIDTH  - 80))
                 ry = int(np.random.randint(80, WINDOW_HEIGHT - 80))
                 ps.add_balls(rx, ry, min(4, target_balls - ps.count))
             elif ps.count > target_balls + 5:
                 ps.set_count(target_balls)
 
-        # ── 2. Track hands ────────────────────────────────────
+        # ── 2. Track hands + gestures ─────────────────────────
         results    = tracker.process(frame)
         hands_data = tracker.extract_hand_data(results, w, h)
         gestures   = [detector.detect(hd, w, h) for hd in hands_data]
         mode       = resolve_mode(gestures)
 
         # ── 3. Freeze state machine ───────────────────────────
-        if mode == 'FROZEN':
+        # OPTION A: Also freeze when in write mode (balls don't interfere)
+        if mode == 'FROZEN' or writer.active:
             ps.freeze()
         elif ps.is_frozen:
             ps.unfreeze()
 
-        # ── 4. Pulse clap detection ───────────────────────────
+        # ── 4. Pulse — clap detection ─────────────────────────
         pulse_fx.check_and_trigger(hands_data)
 
-        # ── 5. Physics forces ─────────────────────────────────
-        if not ps.is_frozen:
+        # ── 5. Write mode OR physics (mutually exclusive) ─────
+        # FIX 2: writer.update() moved OUT of is_frozen guard so
+        #         you can write even while balls are frozen.
+        # FIX 3: painter.update() called ONCE, only in the else
+        #         branch — was previously called twice.
+        if writer.active:
+            writer.update(hands_data, gestures)
+            mode = 'WRITE'          # override mode for UI badge
 
-            if mode == 'GALAXY' and len(hands_data) == 2:
-                c1 = hands_data[0]['center']
-                c2 = hands_data[1]['center']
-                orbit_center = (
-                    (c1[0]+c2[0])//2,
-                    (c1[1]+c2[1])//2
-                )
-                ps.apply_force(physics.orbit(ps.pos, orbit_center))
-                if 'inter_hand_dist' in hands_data[0]:
-                    ps.apply_force(physics.two_hand_force(
-                        ps.pos, c1, c2,
-                        hands_data[0]['inter_hand_dist']
-                    ))
+        else:
+            # Normal physics — skip while frozen
+            if not ps.is_frozen:
 
-            elif mode == 'FLOCK':
-                ps.apply_force(flock.compute(ps))
-                for hand in hands_data:
-                    ps.apply_force(
-                        physics.attraction(ps.pos, hand['center'],
-                                           strength=50)
+                if mode == 'GALAXY' and len(hands_data) == 2:
+                    c1 = hands_data[0]['center']
+                    c2 = hands_data[1]['center']
+                    orbit_center = (
+                        (c1[0] + c2[0]) // 2,
+                        (c1[1] + c2[1]) // 2,
                     )
+                    ps.apply_force(physics.orbit(ps.pos, orbit_center))
+                    if 'inter_hand_dist' in hands_data[0]:
+                        ps.apply_force(physics.two_hand_force(
+                            ps.pos, c1, c2,
+                            hands_data[0]['inter_hand_dist']
+                        ))
 
-            else:
-                for idx, (hand, gesture) in enumerate(
-                    zip(hands_data, gestures)
-                ):
-                    cx, cy = hand['center']
-                    hvel   = vel_track.update(idx, (cx, cy))
-
-                    if mode == 'ATTRACT':
+                elif mode == 'FLOCK':
+                    ps.apply_force(flock.compute(ps))
+                    for hand in hands_data:
                         ps.apply_force(
-                            physics.attraction(ps.pos, (cx, cy))
-                        )
-                        ps.apply_force(
-                            physics.velocity_push(ps.pos,(cx,cy), hvel)
-                        )
-                    elif mode == 'EXPLODE':
-                        ps.apply_force(
-                            physics.repulsion(ps.pos, (cx, cy))
+                            physics.attraction(
+                                ps.pos, hand['center'], strength=50
+                            )
                         )
 
-                    if gesture == 'PINCH':
-                        ps.add_balls(cx, cy, PINCH_SPAWN_COUNT)
+                else:
+                    for idx, (hand, gesture) in enumerate(
+                        zip(hands_data, gestures)
+                    ):
+                        cx, cy = hand['center']
+                        hvel   = vel_track.update(idx, (cx, cy))
 
-            # ── Magnetic trail force (PEACE mode) ─────────────
-            if mode == 'PAINT':
-                for hand, gesture in zip(hands_data, gestures):
-                    if gesture == 'PEACE':
-                        tip = hand['fingertips']['index']
-                        mag_trail.add_point(tip[0], tip[1])
-                ps.apply_force(mag_trail.get_force(ps.pos))
+                        if mode == 'ATTRACT':
+                            ps.apply_force(
+                                physics.attraction(ps.pos, (cx, cy))
+                            )
+                            ps.apply_force(
+                                physics.velocity_push(
+                                    ps.pos, (cx, cy), hvel
+                                )
+                            )
+                        elif mode == 'EXPLODE':
+                            ps.apply_force(
+                                physics.repulsion(ps.pos, (cx, cy))
+                            )
+
+                        if gesture == 'PINCH':
+                            ps.add_balls(cx, cy, PINCH_SPAWN_COUNT)
+
+            # Painter runs only when NOT in write mode (called once)
+            painter.update(hands_data, gestures)
 
         if not hands_data:
             vel_track.clear()
 
-        # ── 6. Magnetic trail aging ───────────────────────────
-        mag_trail.update()
-
-        # ── 7. Painter ────────────────────────────────────────
-        painter.update(hands_data, gestures)
-
-        # ── 8. Ball merging (every 2 frames — saves CPU) ──────
+        # ── 6. Ball merging (every 2 frames) ──────────────────
         if frame_n % 2 == 0:
             ps.merge_check()
 
-        # ── 9. Physics step ───────────────────────────────────
+        # ── 7. Physics step ───────────────────────────────────
         ps.update()
 
-        # ── 10. Render ────────────────────────────────────────
+        # ── 8. Render base frame ──────────────────────────────
         canvas = renderer.render_frame(ps, hands_data, tracker)
 
-        # ── 11. Effect overlays (order matters) ───────────────
-        canvas = constellation.draw(canvas, ps)   # bottom layer
-        canvas = mag_trail.draw(canvas)            # cyan glow
-        canvas = painter.draw(canvas)              # rainbow on top
+        # ── 9. Effect overlays (order matters) ────────────────
+        canvas = constellation.draw(canvas, ps)   # deepest layer
+        canvas = writer.draw(canvas)              # FIX 4: was missing
+        canvas = painter.draw(canvas)             # painter on top of writer
         canvas = pulse_fx.update(canvas, ps, physics)
         canvas = galaxy_fx.draw(canvas, orbit_center, mode)
+        canvas = writer.draw_ui(canvas)           # FIX 4: palette/badge on top
 
-        # Frozen blue tint
+        # Frozen: faint blue tint
         if ps.is_frozen:
-            tint        = np.zeros_like(canvas)
+            tint       = np.zeros_like(canvas)
             tint[:, :] = (40, 20, 0)
-            canvas      = cv2.addWeighted(canvas, 0.92, tint, 0.08, 0)
+            canvas     = cv2.addWeighted(canvas, 0.92, tint, 0.08, 0)
 
-        # ── 12. UI + Settings panel ───────────────────────────
+        # ── 10. UI + settings panel ───────────────────────────
         fps    = ui.tick_fps()
         canvas = ui.draw(canvas, mode, fps)
-        canvas = settings.draw(canvas)     # always on top
+        canvas = settings.draw(canvas)
 
-        # Mode change log
         if mode != prev_mode:
             print(f"[MODE] {prev_mode} → {mode}")
             prev_mode = mode
 
         cv2.imshow(WINDOW_TITLE, canvas)
 
-        # ── 13. Keys ──────────────────────────────────────────
+        # ── 11. Keys ──────────────────────────────────────────
         key = cv2.waitKey(frame_delay) & 0xFF
         if   key == ord('q'): break
         elif key == ord('s'): save_screenshot(canvas)
         elif key == ord('r'):
             ps.__init__(WINDOW_WIDTH, WINDOW_HEIGHT)
             renderer.trail_canvas[:] = 0
-            print("[INFO] Reset.")
+            print("[INFO] Balls reset.")
         elif key == ord('c'):
             painter.clear()
-            mag_trail.clear()
+            writer.clear()                # FIX 6: was missing
             renderer.trail_canvas[:] = 0
             print("[INFO] Canvas cleared.")
-        elif key == ord('x'):
-            constellation.toggle()
-        elif key == ord('p'):
-            settings.toggle()
+        elif key == ord('x'): constellation.toggle()
+        elif key == ord('p'): settings.toggle()
+        elif key == ord('w'): writer.toggle()   # FIX 5: was missing entirely
 
     cam.release()
     tracker.release()

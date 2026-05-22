@@ -26,6 +26,7 @@
 | 🔮 **Ball Merging** | Slow-colliding balls merge into one (momentum-conserving) |
 | ⚙️ **Live Settings** | In-window sliders — force strength, ball count, trail length, glow |
 | 📸 **Screenshot** | Press `S` to save any frame as PNG |
+| ✍️ **Finger Writer** | Draw directly on screen using your fingertip with persistence |
 
 ---
 
