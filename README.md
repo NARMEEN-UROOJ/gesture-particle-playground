@@ -8,7 +8,10 @@
 
 ---
 
-> 📹 **Demo video** — *(coming soon — recording in progress)*
+
+https://github.com/user-attachments/assets/f6036b0c-1546-4c74-8948-2fc16e3b6bc2
+
+
 
 ---
 
